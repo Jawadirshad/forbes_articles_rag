@@ -1,0 +1,16 @@
+numpy==1.26.4
+streamlit
+sentence-transformers
+faiss-cpu
+requests
+ollama
+groq
+python-dotenv
+psycopg2-binary
+pgvector
+opik
+langgraph
+tiktoken
+uvicorn
+pydantic
+fastapi
