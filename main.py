@@ -17,7 +17,7 @@ import uvicorn
 
 load_dotenv()
 
-app = FastAPI(title="RAG API", description="REST API for RAG system with NICE Guidelines")
+app = FastAPI(title="RAG API", description="REST API for RAG system with Forbes Guidelines")
 
 # CORS configuration
 app.add_middleware(
@@ -38,7 +38,8 @@ db_config = {
 }
 
 MODEL = "gpt-4o-mini"
-openai_client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+openai_api_key = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+print(openai_api_key)
 
 # Pydantic models for request/response
 class Query(BaseModel):
@@ -53,33 +54,46 @@ class RAGResponse(BaseModel):
     processing_time: float
 
 # Utility functions (moved from your original code)
+
 def calculate_token_count(messages, model="gpt-4o-mini"):
+    """
+    Calculate token count for a list of messages using tiktoken.
+    """
     encoding = tiktoken.encoding_for_model(model)
     token_count = 0
     for message in messages:
         content = None
-        if isinstance(message, dict):
+        if isinstance(message, dict):  
             content = message.get("content", "")
-        elif hasattr(message, "content"):
+        elif hasattr(message, "content"):  
             content = message.content
+
         if content:
             token_count += len(encoding.encode(str(content)))
     return token_count
 
-def classify_query(query: str) -> dict:
+
+
+
+
+def classify_query(query):
+    client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+    
     classification_prompt = (
         "You are an expert in classifying queries into one of the following categories:\n"
         "1. 'greeting' - If the query is a greeting like 'hello', 'hi', 'good morning', etc.\n"
         "2. 'goodbye' - If the query is a farewell like 'goodbye', 'bye', etc.\n"
-        "3. 'medical' - If the query relates to medical topics, diseases, medications, symptoms\n"
+        "3. 'forbes' - If the query relates to ai topics and knowledge, big data, cloud topics and knowledge, consumer tech and topics\n"
         "4. 'non-forbes' - For riddles queries, gibberish, weather updates, queries like 'who are you', 'what is your name', 'who i am talking to'\n"
-        "5. 'medical' - For ambiguous cases in which you can not decide if its non-medical then default it to medical\n\n"
+        "5. 'forbes' - For ambiguous cases in which you can not decide if its non-forbes then default it to forbes\n\n"
+
         f"{query}\n"
-        "Respond only with valid JSON. Example: {'category': 'medical'}"
+        "Respond only with valid JSON. Example: {'category': 'forbes'}"
     )
     
     try:
-        response = openai_client.chat.completions.create(
+        print("Sending classification request...")
+        response = client.chat.completions.create(
             messages=[{"role": "user", "content": classification_prompt}],
             max_tokens=50,
             temperature=0.1,
@@ -87,39 +101,54 @@ def classify_query(query: str) -> dict:
         )
         
         response_content = response.choices[0].message.content.strip()
+        print(f"Raw classification response: {response_content}")
+
+        # **Fix: Remove triple backticks and language tags if present**
         response_content = response_content.replace("```json", "").replace("```", "").strip()
+
+        # **Fix: Ensure JSON formatting is valid before parsing**
         response_content = response_content.replace("'", '"')
         
         try:
             response_json = json.loads(response_content)
             category = response_json.get("category", "").lower()
+            print(f"Parsed category: {category}")
             return {"category": category}
         except json.JSONDecodeError:
-            return {"category": "medical"}
-    except Exception:
-        return {"category": "medical"}
+            print("!! JSON decode error, defaulting to forbes")
+            return {"category": "forbes"}
+    except Exception as e:
+        print(f"!! Classification error: {str(e)}")
+        return {"category": "forbes"}
 
-def retrieve(query: str) -> dict:
+def retrieve(query: str):
+    """Retrieve information related to a query."""
+    print(f"\n=== RETRIEVAL PHASE ===")
+    print(f"Query: '{query}'")
     try:
         model = SentenceTransformer("all-MiniLM-L6-v2")
+        print("Connecting to database...")
         conn = psycopg2.connect(**db_config)
         register_vector(conn)
         cur = conn.cursor()
         
+        print("Generating embeddings...")
         query_embedding = model.encode(query).tolist()
         
+        print("Executing similarity search...")
         cur.execute("""
-            SELECT md_file, pdf_link, chunk_index, chunk_text
+            SELECT md_file, source_link, chunk_index, chunk_text
             FROM document_embeddings
             ORDER BY embedding <-> %s::vector
             LIMIT 2;
         """, (query_embedding,))
         
         results = cur.fetchall()
+        print(f"Found {len(results)} matching chunks")
         
         formatted_results = [{
             "md_file": row[0],
-            "pdf_link": row[1],
+            "source_link": row[1],
             "chunk_index": row[2],
             "chunk_text": row[3]
         } for row in results]
@@ -128,14 +157,22 @@ def retrieve(query: str) -> dict:
         conn.close()
         
         serialized = "\n\n".join(doc["chunk_text"] for doc in formatted_results)
-        return {"content": serialized, "results": formatted_results}
+        print("Retrieval completed successfully")
+        return json.dumps({"content": serialized, "results": formatted_results})
     except Exception as e:
-        return {"content": "", "results": []}
+        print(f"!! Retrieval error: {str(e)}")
+        return json.dumps({"content": "", "results": []})
 
-def run_rag_conversation(query: str, conversation_history: list) -> dict:
+
+
+
+def run_rag_conversation(query: str, conversation_history: list):
+    print(f"\n=== RAG PROCESSING ===")
+    client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+
     system_prompt = """You MUST follow these rules:
     1. FIRST check the provided context THOROUGHLY. If the user's query already exists or is completely answered in the context, respond using ONLY that context WITHOUT retrieval.
-    2. If answer is not found in provided context, ALWAYS trigger tool call to retrieve from NICE Guidelines database
+    2. If answer is not found in provided context, ALWAYS trigger tool call to retrieve from Forbes Articles database
     3. NEVER respond using your own internal knowledge outside these sources(tool call, provided context)
     4. Tool Calls:
        - When rephrasing the user query try to keep the rephrased queries of medium size and include all information of user query.
@@ -143,16 +180,16 @@ def run_rag_conversation(query: str, conversation_history: list) -> dict:
        - Include relevant context from the user query for better retrieval.
     5. Final Responses:
        - Do not include statements like 'Based on the context' or 'The context information' or 'According to the context'.\n"
-       - Do not cite any links or resources in the final response.
-       - Structure the response with clear headings whenever possible(e.g., '1. Immediate Actions', '2. Investigations', etc.).\n"
-       - Use bullet points for clarity and readability.\n"""
-
+       - Do not cite any links or resources in the final response\n.
+       - Structure the response with clear headings whenever possible.\n"
+       - Use bullet points for clarity and readability.\n"""  
+    
     tools = [
         {
             "type": "function",
             "function": {
                 "name": "retrieve",
-                "description": "Retrieve relevant information from the NICE Guidelines database",
+                "description": "Retrieve relevant information from the Forbes Articles database, the retrieval tool call is must unless answer is fully present in provided context",
                 "parameters": {
                     "type": "object",
                     "properties": {
@@ -168,8 +205,11 @@ def run_rag_conversation(query: str, conversation_history: list) -> dict:
     ]
     
     messages = [{"role": "system", "content": system_prompt}] + conversation_history + [{"role": "user", "content": query}]
-    
-    response = openai_client.chat.completions.create(
+
+    token_count = calculate_token_count(messages, model=MODEL)
+    print(f"Token count for current request: {token_count} tokens")
+
+    response = client.chat.completions.create(
         model=MODEL,
         messages=messages,
         tools=tools,
@@ -181,35 +221,49 @@ def run_rag_conversation(query: str, conversation_history: list) -> dict:
     messages.append(response_message)
     
     retrieved_results = []
+
     context = None
-    
     if tool_calls:
+        print(f"2. Tool Calls Detected ({len(tool_calls)})")
         for tool_call in tool_calls:
             function_name = tool_call.function.name
             function_args = json.loads(tool_call.function.arguments)
+            print(f" - Tool: {function_name}")
+            print(f"   Args: {function_args}")
             
             if function_name == "retrieve":
+                print("3. Executing Retrieval...")
+                start_time = time.time()
                 function_response = retrieve(function_args.get("query"))
-                retrieved_results = function_response.get("results", [])
+                retrieved_data = json.loads(function_response)
+                retrieved_results = retrieved_data.get("results", [])
+                retrieval_time = time.time() - start_time
+                print(f"   Retrieval took {retrieval_time:.2f}s")
+                
                 messages.append({
                     "tool_call_id": tool_call.id,
                     "role": "tool",
                     "name": function_name,
-                    "content": json.dumps(function_response),
+                    "content": function_response,
                 })
-                context = function_response.get("content", "")
-    
-    final_response = openai_client.chat.completions.create(
+                context = json.loads(function_response).get("content", "")
+                print(context)
+
+    token_count_final = calculate_token_count(messages, model=MODEL)
+    print(f"Token count for final request: {token_count_final} tokens")
+    final_response = client.chat.completions.create(
         model=MODEL,
         messages=messages
     )
     answer = final_response.choices[0].message.content
-    
+    print("5. Response Generation Complete")
+    print(retrieved_results)
     return {
         "answer": answer,
         "context": context,
         "results": retrieved_results
     }
+
 
 # FastAPI endpoints
 @app.post("/api/query", response_model=RAGResponse)
@@ -217,9 +271,11 @@ async def process_query(query: Query):
     start_time = time.time()
     
     # Classify query
+    print(query)
+
     classification = classify_query(query.text)
-    category = classification.get("category", "medical")
-    
+    category = classification.get("category", "forbes")
+    print(classification)
     response = {
         "answer": "",
         "context": None,
@@ -228,24 +284,22 @@ async def process_query(query: Query):
         "processing_time": 0
     }
     
-    if category in ["greeting", "goodbye", "non-medical"]:
+    if category in ["greeting", "goodbye", "non-forbes"]:
         responses = {
             "greeting": "Hello! How can I assist you today?",
             "goodbye": "Goodbye! Feel free to ask more questions anytime.",
-            "non-medical": "Please ask a question related to NICE Guidelines."
+            "non-forbes": "Please ask a question related to Forbes articles."
         }
         response["answer"] = responses[category]
     
-    elif category == "medical":
+    elif category == "forbes":
+        print(query)
         result = run_rag_conversation(query.text, query.conversation_history)
         response.update(result)
     
     response["processing_time"] = time.time() - start_time
     return response
 
-@app.get("/health")
-async def health_check():
-    return {"status": "healthy"}
 
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=8000)

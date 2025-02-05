@@ -1,23 +1,21 @@
-# Use an official Python runtime as a parent image
+# Step 1: Use an official Python runtime as the base image
 FROM python:3.9-slim
 
-# Set the working directory in the container
+# Step 2: Set the working directory inside the container
 WORKDIR /app
 
-# Copy the requirements file into the container
-COPY requirements.txt .
+# Step 3: Copy the current directory content (project files) into the container's working directory
+COPY . /app
 
-# Install any needed packages specified in requirements.txt
+# Step 4: Install dependencies
+# Copy the requirements.txt file first to leverage Docker caching for dependencies
+COPY requirements.txt /app/requirements.txt
+
+# Install the dependencies
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Copy the current directory contents into the container at /app
-COPY . .
+# Step 5: Expose port 8000 for FastAPI to listen on
+EXPOSE 8000
 
-# Make port 8501 available to the world outside this container
-EXPOSE 8501
-
-# Define environment variable
-ENV TOKENIZERS_PARALLELISM=false
-
-# Run the application
-CMD ["streamlit", "run", "streamlit_test.py"]
+# Step 6: Run the application using Uvicorn
+CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000", "--reload"]
